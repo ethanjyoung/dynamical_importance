@@ -1,0 +1,231 @@
+---
+title: "Dynamical importance and network perturbations"
+subtitle: "Code Notebook"
+author: "Ethan Young, Mason A. Porter"
+date: "`r Sys.Date()`"
+output: pdf_document
+---
+
+# Install packages:
+
+```{r}
+library(igraph)
+```
+
+# Compute first-order edge dynamical importance (FoEDI) for all edges:
+
+```{r foedi}
+foedi <- function(graph, # input igraph graph object
+                  is_normalized=TRUE, # if TRUE, divide by lambda
+                  is_directed=FALSE, # if FALSE, undirected graph
+                  remove_edges=TRUE){ # if TRUE, compute FoEDI for edge removal
+  if(remove_edges){
+    G <- graph
+    A <- as_adjacency_matrix(G, type="both")
+    A <- as.matrix(A) # adjacency matrix as matrix object
+    indices <- as_edgelist(G) # vector of indices of edges
+  }else{
+    G <- graph
+    A <- as_adjacency_matrix(G, type="both")
+    A <- as.matrix(A)
+    G_comp <- complementer(G, loops=FALSE) # complement of input graph G
+    A_comp <- as_adjacency_matrix(G_comp, type="both") # complement of A
+    A_comp <- as.matrix(A_comp)
+    indices <- as_edgelist(G_comp)
+  }
+  
+  foedi_vec <- numeric()
+  
+  w_u <- eigen(A) # eigendecomposition of adjacency matrix A
+  lambda_1 <- Re(w_u$values[1])
+  v <- Re(w_u$vectors[, 1]) # right leading eigenvector
+  u <- Re(eigen(t(A))$vectors[, 1]) # left leading eigenvector
+
+  for(n in 1:nrow(indices)){ # iterate through pairs of indices
+    i <- indices[n, ][1]
+    j <- indices[n, ][2]
+    
+    if(remove_edges){
+      A_ij <- A[i, j]
+    }else{
+      A_ij <- A_comp[i, j]
+    }
+    
+    v_j<- v[j]
+    u_i <- u[i]
+    ut_v <- t(u) %*% v
+    
+    if(is_directed){
+      foedi_vec[n] <- (A_ij * v_j * u_i) / ut_v
+    }else{
+      foedi_vec[n] <- (2 * A_ij * v_j * u_i) / ut_v
+    }
+    
+  }
+  
+  if(is_normalized){
+      foedi_vec <- foedi_vec / lambda_1
+    }else{
+      foedi_vec <- foedi_vec
+  }
+  
+  return(foedi_vec)
+}
+```
+
+## Example:
+```{r}
+# ER random graph
+set.seed(168) # initialize random seed
+n <- 100 # number of nodes
+p <- 0.15 # edge probability
+er_graph <- erdos.renyi.game(n=n, p=p, type="gnp", directed=FALSE, loops=FALSE)
+
+print(head(sort(foedi(er_graph, 
+                      is_normalized=TRUE, 
+                      is_directed=FALSE), 
+                decreasing=TRUE), n=5)) # print 5 largest FoEDI values
+```
+
+# Iteratively add edges with highest FoEDI
+
+## Return the edge with the highest FoEDI
+```{r return-edge}
+foedi_edge <- function(graph, # input igraph graph object
+                       is_normalized=TRUE, # if TRUE, divide by lambda
+                       is_directed=FALSE){ # if FALSE, undirected graph
+  G <- graph
+  A <- as_adjacency_matrix(G, type="both")
+  A <- as.matrix(A)
+  
+  G_comp <- complementer(G, loops=FALSE) # complement of input graph G
+  A_comp <- as_adjacency_matrix(G_comp, type="both") # complement of A
+  A_comp <- as.matrix(A_comp) # complement of adjacency matrix as matrix object
+  indices <- as_edgelist(G_comp) # vector of indices of edges
+  
+  foedi_vec <- numeric() # initialize empty vector
+  
+  w_u <- eigen(A) # eigendecomposition of adjacency matrix A
+  lambda_1 <- Re(w_u$values[1])
+  v <- Re(w_u$vectors[, 1]) # right leading eigenvector
+  u <- Re(eigen(t(A))$vectors[, 1]) # left leading eigenvector
+
+  for(n in 1:nrow(indices)){
+    i <- indices[n, ][1]
+    j <- indices[n, ][2]
+    A_ij <- A_comp[i, j]
+    v_j<- v[j]
+    u_i <- u[i]
+    ut_v <- t(u) %*% v
+    if(is_directed){
+      foedi_vec[n] <- (A_ij * v_j * u_i) / ut_v
+    }else{
+      foedi_vec[n] <- (2 * A_ij * v_j * u_i) / ut_v
+    }
+  }
+  
+  if(is_normalized){
+      foedi_vec <- foedi_vec / lambda_1
+    }else{
+      foedi_vec <- foedi_vec
+    }
+  
+  indices_foedi <- unname(cbind(indices, foedi_vec)) # bind columns of indices 
+                                                     # to corresponding FoEDI
+  return(indices_foedi[which.max(indices_foedi[, 3]), ]) # return indices with largest FoEDI
+}
+```
+
+## Add the edge with the highest FoEDI
+```{r add-edge}
+edge_addition <- function(graph, # input igraph graph object
+                          is_normalized=TRUE, # if TRUE, divide by lambda
+                          is_directed=FALSE, # if FALSE, undirected graph
+                          measure_vals=FALSE){ # if TRUE, create vectors of 
+                                               # standard deviation of degree and 
+                                               # eigenvalue as edges are added
+
+  A <- as_adjacency_matrix(G, type="both")
+  A <- as.matrix(A)
+  N <- nrow(A)
+  G_comp <- complementer(G, loops=FALSE)
+  
+  if(measure_vals){
+    evals <- Re(eigen(A)$values[1])
+    k <- degree(G, loops=FALSE) # no self-loops
+    mean_k <- mean(k) # compute mean of degree distribution of G
+    sd_k <- sd(k) # compute standard deviation of degree distribution of G
+    edges <- 0 # initialize count of number of edges added
+  }
+  
+  V(G)$name <- seq_len(N) # label nodes in G (ranging from 1 to N)
+  V(G_comp)$name <- seq_len(N) # label nodes in complement of G (from 1 to N)
+  indices <- as_edgelist(G_comp)
+  
+  for(n in 1:nrow(indices)){
+    edge_index <- foedi_edge(G, is_normalized=is_normalized, is_directed=is_directed)
+    G <- add_edges(G, c(edge_index[1], edge_index[2])) # add edge to G from complement
+    
+    if(measure_vals){
+      evals <- c(evals, Re(eigen(as_adjacency_matrix(G, type="both"))$values[1]))
+      k <- degree(G, loops=FALSE)
+      mean_k <- c(mean_k, mean(k))
+      sd_k <- c(sd_k, sd(k))
+      edges <- c(edges, n)
+    }
+    
+    G_comp <- delete_edges(G_comp, get.edge.ids(G_comp, # remove edge from complement of G
+                                                c(edge_index[1], edge_index[2]))) 
+  }
+  
+  if(measure_vals){
+    evals <- c(evals, Re(eigen(as_adjacency_matrix(G, type="both"))$values[1]))
+    k <- degree(G, loops=FALSE)
+    mean_k <- c(mean_k, mean(k))
+    sd_k <- c(sd_k, sd(k))
+    edges <- c(edges, n + 1)
+    
+    edges_evals <- cbind(edges, evals)
+    mean_sd_mat <- cbind(edges, mean_k, sd_k) # append columns of mean and standard deviation
+                                              # of degree as edges are added to G
+    value_mat <- list('edges_evals'=edges_evals, 'mean_sd_mat'=mean_sd_mat)
+    
+    return(value_mat)
+  }
+}
+```
+
+## Plotting:
+```{r evals-degree}
+plot_evals_degree <- function(output_vals){
+  edges_evals <- output_vals$edges_evals
+
+  plot(edges_evals[, 1], edges_evals[, 2], col=c('blue'), type='l', lty=1, lwd=2, 
+       xlim=c(0, max(edges_evals[, 1])), ylim=c(0, max(edges_evals[, 2])), 
+       xlab="", ylab="", xaxs = "i", yaxs = "i", cex.axis=2)
+  
+  mean_sd_degree <- output_vals$mean_sd_mat 
+  x <- mean_sd_degree[, 1]
+  y <- mean_sd_degree[, 3]
+  
+  plot(x, y, col=c('red'), type='l', lty=1, lwd=2, 
+       xlim=c(0, max(x)), ylim=c(0, max(y)+1),
+       xlab="", ylab="", xaxs = "i", yaxs = "i", cex.axis=2)
+}
+```
+ 
+## Example:
+```{r}
+# ER random graph
+set.seed(168) # initialize random seed
+n <- 100 # number of nodes
+p <- 0.15 # edge probability
+er_graph <- erdos.renyi.game(n=n, p=p, type="gnp", directed=FALSE, loops=FALSE)
+
+plot_values <- edge_addition(er_graph,
+                             is_normalized=TRUE, 
+                             is_directed=FALSE, 
+                             measure_vals=TRUE)
+plot_evals_degree(plot_values)
+```
+
